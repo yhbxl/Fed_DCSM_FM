@@ -117,8 +117,8 @@ if __name__ == "__main__":
 
     # 示例：加载 MNIST 数据集
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-    train_dataset = datasets.MNIST('../data/mnist/', train=True, download=True, transform=transform)
-    test_dataset = datasets.MNIST('../data/mnist/', train=False, download=True, transform=transform)
+    train_dataset = datasets.MNIST('./data/mnist/', train=True, download=True, transform=transform)
+    test_dataset = datasets.MNIST('./data/mnist/', train=False, download=True, transform=transform)
 
     # 将数据集划分给多个客户端
     num_clients = 10
