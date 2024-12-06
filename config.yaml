@@ -1,0 +1,11 @@
+strategy: lstm
+num_clients: 5
+num_rounds: 10
+epochs: 1
+lr: 0.01
+lstm_config:
+  input_size: 5
+  hidden_size: 10
+  output_size: 1
+time_window_config:
+  window_size: 10

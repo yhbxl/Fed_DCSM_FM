@@ -7,28 +7,51 @@ import copy
 import numpy as np
 from torchvision import datasets, transforms
 import torch
-from DCSM_FM.EWC import EWCClient
-from DCSM_FM.LSTM import ClientSelectorLSTM
-from DCSM_FM.TimeWindow import TimeWindowSelector
+import yaml
+import os
 
+# 导入客户端选择策略
+from client_selection.EWC import EWCClientSelector
+from client_selection.LSTM import ClientSelectorLSTM, select_clients_with_lstm
+from client_selection.TimeWindow import TimeWindowSelector
+
+# 加载配置文件
+with open('config.yaml', 'r') as file:
+    config = yaml.safe_load(file)
+
+strategy = config['strategy']
+num_clients = config['num_clients']
+num_rounds = config['num_rounds']
+epochs = config['epochs']
+lr = config['lr']
+
+if strategy == 'lstm':
+    lstm_config = config['lstm_config']
+    lstm_model = ClientSelectorLSTM(**lstm_config)
+elif strategy == 'timewindow':
+    time_window_config = config['time_window_config']
+    time_window_selector = TimeWindowSelector(**time_window_config)
+else:
+    ewc_client_selector = EWCClientSelector(num_clients=num_clients)
 
 # 联邦学习训练过程函数
-def fedavg_train(server_model, clients, num_rounds=10, num_clients=5, epochs=1, lr=0.01):
-    # 初始化时间窗口选择器
-    time_window_selector = TimeWindowSelector(window_size=10)
-    # 初始化 LSTM 模型用于客户端选择
-    lstm_model = ClientSelectorLSTM(input_size=5, hidden_size=10, output_size=1)
-
-    # 将服务器模型和 LSTM 模型移动到 GPU
-    server_model.to(device)
-    lstm_model.to(device)
+def fedavg_train(server_model, clients, num_rounds=num_rounds, num_clients=num_clients, epochs=epochs, lr=lr):
+    if strategy == 'lstm':
+        lstm_model.to(device)
+    elif strategy == 'timewindow':
+        pass  # 时间窗口选择器不需要移动到设备
 
     for round_num in range(num_rounds):
         print(f"Round {round_num + 1}")
 
-        # Step 1: 使用 LSTM 模型选择客户端
-        client_histories = torch.rand(len(clients), 10, 5)  # 示例输入：随机生成的客户端历史记录
-        selected_clients_indices = select_clients_with_lstm(lstm_model, client_histories)[:num_clients]
+        # Step 1: 使用指定的客户端选择策略选择客户端
+        if strategy == 'lstm':
+            client_histories = torch.rand(len(clients), lstm_config['window_size'], lstm_config['input_size']).to(device)  # 示例输入：随机生成的客户端历史记录
+            selected_clients_indices = select_clients_with_lstm(lstm_model, client_histories)[:num_clients]
+        elif strategy == 'timewindow':
+            selected_clients_indices = time_window_selector.select_clients(clients, num_clients)
+        else:
+            selected_clients_indices = ewc_client_selector.select_clients(clients)
 
         # Step 2: 在选定客户端上训练本地模型
         client_weights = []
@@ -56,13 +79,38 @@ def fedavg_train(server_model, clients, num_rounds=10, num_clients=5, epochs=1, 
         # 更新全局模型权重
         server_model.load_state_dict(new_global_weights)
 
-        # Step 4: 更新时间窗口
+        # Step 4: 计算全局平均损失
+        global_loss = 0
+        global_correct = 0
+        global_total = 0
         for client_id in selected_clients_indices:
-            # 示例：性能分数可以定义为使用的数据大小
-            time_window_selector.update_client_performance(client_id, len(clients[client_id].data_loader.dataset))
+            client = clients[client_id]
+            client_model = copy.deepcopy(server_model)
+            client_model.eval()
+            loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
+
+            with torch.no_grad():
+                for data, target in client.data_loader:
+                    data, target = data.to(device), target.to(device)
+                    output = client_model(data)
+                    loss = loss_fn(output, target)
+                    global_loss += loss.item()
+                    _, predicted = torch.max(output.data, 1)
+                    global_total += target.size(0)
+                    global_correct += (predicted == target).sum().item()
+
+        global_avg_loss = global_loss / global_total
+        global_accuracy = global_correct / global_total
+        print(f"Global Average Loss: {global_avg_loss}")
+        print(f"Global Accuracy: {global_accuracy}")
+
+        # Step 5: 更新时间窗口
+        if strategy == 'timewindow':
+            for client_id in selected_clients_indices:
+                # 示例：性能分数可以定义为使用的数据大小
+                time_window_selector.update_client_performance(client_id, len(clients[client_id].data_loader.dataset))
 
     print("Training completed!")
-
 
 # 示例客户端训练类
 class Client:
@@ -71,6 +119,7 @@ class Client:
         self.device = device
 
     def train(self, model, epochs, lr):
+        model.to(self.device)  # 将模型移动到 GPU
         model.train()
         optimizer = torch.optim.SGD(model.parameters(), lr=lr)
         loss_fn = torch.nn.CrossEntropyLoss()
@@ -81,7 +130,7 @@ class Client:
 
         for epoch in range(epochs):
             for data, target in self.data_loader:
-                data, target = data.to(self.device), target.to(self.device)
+                data, target = data.to(self.device), target.to(self.device)  # 将数据移动到 GPU
                 optimizer.zero_grad()
                 output = model(data)
                 loss = loss_fn(output, target)
@@ -100,15 +149,6 @@ class Client:
         # 返回客户端的模型权重、准确率和损失
         return copy.deepcopy(model.state_dict()), accuracy, avg_loss
 
-
-# 使用 LSTM 模型选择客户端的函数
-def select_clients_with_lstm(lstm_model, client_histories):
-    lstm_model.eval()
-    scores = lstm_model(client_histories)  # 假设输出是客户端得分
-    selected_clients = scores.squeeze().topk(k=len(client_histories), dim=0).indices.tolist()  # 选出得分最高的客户端
-    return selected_clients
-
-
 # 主函数
 if __name__ == "__main__":
     # 确定设备
@@ -121,7 +161,7 @@ if __name__ == "__main__":
     test_dataset = datasets.MNIST('./data/mnist/', train=False, download=True, transform=transform)
 
     # 将数据集划分给多个客户端
-    num_clients = 10
+    num_clients = config['num_clients']
     data_loaders = [torch.utils.data.DataLoader(torch.utils.data.Subset(train_dataset, range(i, len(train_dataset), num_clients)), batch_size=32, shuffle=True) for i in range(num_clients)]
 
     # 初始化全局模型（MLP 示例）
@@ -133,13 +173,9 @@ if __name__ == "__main__":
     )
 
     # 将客户端封装成对象
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     clients = [Client(data_loader, device) for data_loader in data_loaders]
 
     # 启动联邦训练
-    fedavg_train(global_model, clients, num_rounds=5, num_clients=5, epochs=1, lr=0.01)
+    fedavg_train(global_model, clients, num_rounds=num_rounds, num_clients=num_clients, epochs=epochs, lr=lr)
 
-    print("Global DCSM_FM training completed!")
-
-
-
+    print("Global model training completed!")
