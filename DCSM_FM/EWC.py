@@ -11,7 +11,7 @@ class EWCClient:
         self.optimal_params = optimal_params
 
     def train(self, global_model, epochs=1, lr=0.01):
-        # Load global model
+        # Load global DCSM_FM
         self.model.load_state_dict(global_model.state_dict())
         optimizer = optim.SGD(self.model.parameters(), lr=lr)
         criterion = nn.CrossEntropyLoss()

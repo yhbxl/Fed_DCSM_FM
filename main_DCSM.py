@@ -139,7 +139,7 @@ if __name__ == "__main__":
     # 启动联邦训练
     fedavg_train(global_model, clients, num_rounds=5, num_clients=5, epochs=1, lr=0.01)
 
-    print("Global model training completed!")
+    print("Global DCSM_FM training completed!")
 
 
 
