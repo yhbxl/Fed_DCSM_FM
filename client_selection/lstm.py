@@ -21,6 +21,6 @@ class ClientSelectorLSTM(nn.Module):
 
 def select_clients_with_lstm(lstm_model, client_histories, num_clients):
     lstm_model.eval()
-    scores = lstm_model(client_histories)  # 假设输出是客户端得分
+    scores = lstm_model(client_histories.unsqueeze(1))  # 添加一个序列长度维度
     selected_clients = scores.squeeze().topk(k=num_clients, dim=0).indices.tolist()  # 选出得分最高的客户端
     return selected_clients

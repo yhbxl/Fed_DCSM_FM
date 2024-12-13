@@ -1,5 +1,6 @@
 # 导入所需模块
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
@@ -11,12 +12,12 @@ import yaml
 import os
 
 # 导入客户端选择策略
-from client_selection.EWC import EWCClientSelector
-from client_selection.LSTM import ClientSelectorLSTM, select_clients_with_lstm
-from client_selection.TimeWindow import TimeWindowSelector
+from client_selection.random import RandomClientSelector
+from client_selection.ewc import EWCClientSelector
+from client_selection.lstm import ClientSelectorLSTM, select_clients_with_lstm
 
 # 加载配置文件
-with open('config.yaml', 'r') as file:
+with open('config.yaml', 'r', encoding='utf-8') as file:  # 显式指定编码为 utf-8
     config = yaml.safe_load(file)
 
 strategy = config['strategy']
@@ -28,28 +29,30 @@ lr = config['lr']
 if strategy == 'lstm':
     lstm_config = config['lstm_config']
     lstm_model = ClientSelectorLSTM(**lstm_config)
-elif strategy == 'timewindow':
-    time_window_config = config['time_window_config']
-    time_window_selector = TimeWindowSelector(**time_window_config)
+elif strategy == 'random':
+    random_client_selector = RandomClientSelector(num_clients=num_clients)
 else:
     ewc_client_selector = EWCClientSelector(num_clients=num_clients)
+
 
 # 联邦学习训练过程函数
 def fedavg_train(server_model, clients, num_rounds=num_rounds, num_clients=num_clients, epochs=epochs, lr=lr):
     if strategy == 'lstm':
         lstm_model.to(device)
-    elif strategy == 'timewindow':
-        pass  # 时间窗口选择器不需要移动到设备
+
+    global_accuracies = []
+    global_losses = []
 
     for round_num in range(num_rounds):
         print(f"Round {round_num + 1}")
 
         # Step 1: 使用指定的客户端选择策略选择客户端
         if strategy == 'lstm':
-            client_histories = torch.rand(len(clients), lstm_config['window_size'], lstm_config['input_size']).to(device)  # 示例输入：随机生成的客户端历史记录
-            selected_clients_indices = select_clients_with_lstm(lstm_model, client_histories)[:num_clients]
-        elif strategy == 'timewindow':
-            selected_clients_indices = time_window_selector.select_clients(clients, num_clients)
+            # 生成 client_histories，形状为 (len(clients), lstm_config['input_size'])
+            client_histories = torch.rand(len(clients), lstm_config['input_size']).to(device)
+            selected_clients_indices = select_clients_with_lstm(lstm_model, client_histories, num_clients)
+        elif strategy == 'random':
+            selected_clients_indices = random_client_selector.select_clients(clients, num_clients)
         else:
             selected_clients_indices = ewc_client_selector.select_clients(clients)
 
@@ -104,13 +107,36 @@ def fedavg_train(server_model, clients, num_rounds=num_rounds, num_clients=num_c
         print(f"Global Average Loss: {global_avg_loss}")
         print(f"Global Accuracy: {global_accuracy}")
 
-        # Step 5: 更新时间窗口
-        if strategy == 'timewindow':
-            for client_id in selected_clients_indices:
-                # 示例：性能分数可以定义为使用的数据大小
-                time_window_selector.update_client_performance(client_id, len(clients[client_id].data_loader.dataset))
+        global_accuracies.append(global_accuracy)
+        global_losses.append(global_avg_loss)
 
     print("Training completed!")
+
+    # 绘制训练结果
+    plot_training_results(global_accuracies, global_losses)
+
+
+def plot_training_results(global_accuracies, global_losses):
+    plt.figure(figsize=(12, 6))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(range(1, num_rounds + 1), global_accuracies, marker='o')
+    plt.title('Global Accuracy over Rounds')
+    plt.xlabel('Rounds')
+    plt.ylabel('Accuracy')
+    plt.grid(True)
+
+    plt.subplot(1, 2, 2)
+    plt.plot(range(1, num_rounds + 1), global_losses, marker='x')
+    plt.title('Global Loss over Rounds')
+    plt.xlabel('Rounds')
+    plt.ylabel('Loss')
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.savefig('training_results.png')
+    plt.close()
+
 
 # 示例客户端训练类
 class Client:
@@ -130,7 +156,7 @@ class Client:
 
         for epoch in range(epochs):
             for data, target in self.data_loader:
-                data, target = data.to(self.device), target.to(self.device)  # 将数据移动到 GPU
+                data, target = data.to(device), target.to(device)  # 将数据移动到 GPU
                 optimizer.zero_grad()
                 output = model(data)
                 loss = loss_fn(output, target)
@@ -149,6 +175,7 @@ class Client:
         # 返回客户端的模型权重、准确率和损失
         return copy.deepcopy(model.state_dict()), accuracy, avg_loss
 
+
 # 主函数
 if __name__ == "__main__":
     # 确定设备
@@ -162,7 +189,9 @@ if __name__ == "__main__":
 
     # 将数据集划分给多个客户端
     num_clients = config['num_clients']
-    data_loaders = [torch.utils.data.DataLoader(torch.utils.data.Subset(train_dataset, range(i, len(train_dataset), num_clients)), batch_size=32, shuffle=True) for i in range(num_clients)]
+    data_loaders = [
+        torch.utils.data.DataLoader(torch.utils.data.Subset(train_dataset, range(i, len(train_dataset), num_clients)),
+                                    batch_size=32, shuffle=True) for i in range(num_clients)]
 
     # 初始化全局模型（MLP 示例）
     global_model = torch.nn.Sequential(
@@ -174,6 +203,13 @@ if __name__ == "__main__":
 
     # 将客户端封装成对象
     clients = [Client(data_loader, device) for data_loader in data_loaders]
+
+    # 初始化客户端选择策略
+    ewc_client_selector = EWCClientSelector(num_clients=num_clients)
+    lstm_model = ClientSelectorLSTM(input_size=config['lstm_config']['input_size'],
+                                    hidden_size=config['lstm_config']['hidden_size'],
+                                    output_size=config['lstm_config']['output_size'])
+    random_client_selector = RandomClientSelector(num_clients=num_clients)
 
     # 启动联邦训练
     fedavg_train(global_model, clients, num_rounds=num_rounds, num_clients=num_clients, epochs=epochs, lr=lr)

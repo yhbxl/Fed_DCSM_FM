@@ -1,4 +1,4 @@
-strategy: lstm
+strategy: lstm  # 可选值: 'random', 'ewc', 'lstm', 'timewindow'
 num_clients: 5
 num_rounds: 10
 epochs: 1
